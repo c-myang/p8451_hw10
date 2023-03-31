@@ -11,11 +11,15 @@ knitr::opts_chunk$set(echo = TRUE,
                       fig.dim = c(12, 7))
 ```
 
-## Demonstrate Interaction using Regression Models and Tree-based Methods using Exposome Data from HELIX
+In this exercise, we will use real-world exposomic data adapted from the HELIX harmonized birth cohorts in Europe to explore and develop a research question based on high-dimensional epidemiological data (HDD).
+
+The exposomic data contains 4 data frames: exposome, phenotype, covariate and codebook. Exposome contains all of the environmental features measured on children. Phenotype contains health outcomes measured during the study. Covariate contains demographics and maternal information during pregnancy. Codebook is a detailed listing of all variables within the data frames. 
+
+We will use these features to try to identify which pre-natal chemical exposures are the greatest risk factors for childhood neurobehavioural problems, as measured through the CBCL scale.
 
 ### Load .Rdata file and merge into single data frame
 
-Reminder: Merging into a single data frame is optional. Depends upon how you program. This example will assume you've merged everything into a single data frame.
+Below we will merge the exposome data, select the features related to pre-natal chemical exposures, select our phenotypic outcome of interest, `hs_Gen_Tot`, and partition the data into a 70/30 training-testing split.
 
 ```{r dataprep}
 library(tidyverse)
@@ -26,91 +30,89 @@ library(kableExtra)
 #Load data using path of where file is stored
 load("./exposome.RData")
 
-#Merge all data frames into a single data frame. FYI, this is just a shortcut by combining baseR with piping from tidyverse. There are other ways of merging across three data frames that are likely more elegant.
+#Merge all data frames into a single data frame. 
 
 studydata<-merge(exposome,phenotype,by="ID") %>% merge(covariates, by="ID")
 
 #Strip off ID Variable
 studydata$ID<-NULL
 
-#Partition data for use in demonstration
+# Extracting features only related to pre-natal exposure to chemicals and neurobehavioural phenotype outcome
+studydata = studydata %>% select(hs_as_m_Log2:hs_tl_mdich_None, hs_dde_madj_Log2:hs_cotinine_mcat_None, hs_Gen_Tot) %>% 
+  select(contains(c("_m_", "_madj_", "e3_asmokcigd_p_None", "hs_cotinine_mcat_None", "hs_Gen_Tot")))
+
+#Partition data
 set.seed(123)
-train.indices<-createDataPartition(y=studydata$e3_bw,p=0.7,list=FALSE)
+train.indices<-createDataPartition(y=studydata$hs_Gen_Tot, p=0.7, list=FALSE)
 train.data<-studydata[train.indices, ]
 test.data<-studydata[-train.indices, ]
 ```
 
-### Step 1: Data Exploration of Training Data
+### Step 1: Exploration of Training Data
+
+The code chunk below outputs a table of summary statistics of the test data features. We will also plot the distribution of the outcome, the outcome, `hs_Gen_Tot`, to examine its overall distribution.
 
 ```{r dataexplore}
+summary(train.data) %>% kbl(digits = 3) %>% 
+  kable_classic(lightable_options = "hover") %>% 
+  scroll_box(width = "100%", height = "100%")
 
+ggplot(data = train.data, aes(x = hs_Gen_Tot)) + geom_histogram()
 ```
+Based on the summary statistics, the log-transformed pre-natal chemical exposures have varying distributions across features, with features like arsenic levels (`hs_as_m_Log2`) , while the outcome appears to be right-skewed. 
 
 ### Step 2: Research Question
 
-Put your Research Question in this section. It can be a prediction question OR it can be a hypothesis-generating question about either combinations of features or interactions between features.
-
-
+*What are the pre-natal exposures to chemicals (metals, Organochlorines, Organophosphate pesticides, PBDE, PFAS, Phenols, tobacco smoke) that best predict childhood neurobehavioural internalizing and externalizing problems (as measured on the CBCL scale)?*
 
 ***
 
 ### Step 3: Implement pipeline to address research question
 
-You only need to implement a single algorithm to address your research question.Tune hyperparameters to obtain optimal model in training then evaluate in test set.
+For feature selection, we will use a LASSO algorithm to identify the features that best predict childhood internalizing/externalizing problems through the CBCL scale. The model will be trained using 10-fold cross-validation, with the alpha value fixed to 1 and using a search grid of 100 values between 10^(-0.5) and 10^(0.5) to tune lambda. The best tune will be selected based on the lowest RMSE. 
 
 ```{r algorithm}
-
-```
-
-
-
-### OPTIONAL: Create Models to examine whether two features interact using linear regression
-
-This is a demonstration of code for some interaction analyses.
-
-Note I'm not scaling before running my glm models. If this were a prediction question, I would likely scale so that my coefficients would be interpretable for variable importance. But this is just to show how one codes interaction terms in R using glm. Would be similar if you used within the caret framework. I'm also showing how you would code interaction terms within an elastic net framework using caret.
-
-You can replace the features here with features from your own research question if you'd like to being exploring interactions using linear regression and elastic net. Model.1 and Model.2.a/b are just linear regression while Model 3 is an elastic net that automates examining interactions.
-
-```{r interaction}
-#Model 1: Three features, indoor NO2, building density and walkability metric, in relation to child birthweight (I'm assuming measures are consistent pre and postnatal. Likely a bad assumption but just for illustrative purposes)
-
-model.1<-glm(e3_bw~h_NO2_Log+h_builtdens300_preg_Sqrt+h_walkability_mean_preg_None, data=train.data) 
-summary(model.1)
-
-#Model 2a: Including an interaction term between two features
-model.2a<-glm(e3_bw~h_NO2_Log+h_builtdens300_preg_Sqrt+h_walkability_mean_preg_None+h_NO2_Log*h_builtdens300_preg_Sqrt, data=train.data)
-summary(model.2a)
-
-#Model 2b: Including all combinations of two-way interactions using shortcut in glm
-model.2b<-glm(e3_bw~(h_NO2_Log+h_builtdens300_preg_Sqrt+h_NO2_Log+h_walkability_mean_preg_None)^2, data=train.data)
-summary(model.2b)
-
-
-#Model 3: Using the caret framework to run an elastic-net with interaction terms between all features using shortcut
 set.seed(123)
 
-model.3<- train(
-  e3_bw ~(h_NO2_Log+h_builtdens300_preg_Sqrt+h_NO2_Log+h_walkability_mean_preg_None)^2, data = train.data, preProcess="scale", method = "glmnet",
-  trControl = trainControl("cv", number = 5),
- tuneLength=10
-  )
+#Create grid to search lambda
+lambda = 10^seq(-0.5, 0.5, length = 100)
+
+#Fit model with tuneGrid
+mod_lasso = train(hs_Gen_Tot ~ ., data = train.data, method = "glmnet", 
+                  trControl = trainControl("cv", number = 10), 
+                  tuneGrid = expand.grid(alpha = 1, lambda = lambda),
+                  preProcess = c("center", "scale"))
+
 #Print the values of alpha and lambda that gave best prediction
-model.3$bestTune
+mod_lasso$bestTune
 
-#Examine model coeficients for variable importance
-coef(model.3$finalModel, model.3$bestTune$lambda)
+mod_lasso$results %>% 
+  arrange(RMSE) %>% 
+  head(5) %>% 
+  kbl(digits = 4) %>% 
+  kable_classic("hover") 
 
-#Predict in test-set
-model.3.pred <- model.3 %>% predict(test.data)
+coef(mod_lasso$finalModel, mod_lasso$bestTune$lambda) 
 
-# Evaluation metrics and prediction performance
-data.frame(
-  RMSE = RMSE(model.3.pred, test.data$e3_bw),
-  Rsquare = R2(model.3.pred, test.data$e3_bw)
-)
-
+varImp(mod_lasso$finalModel) %>% arrange(desc(Overall)) %>% head(15)
 ```
 
+The best tune for the LASSO model was found to be `r round(mod_lasso$bestTune$lambda, 3)`. Examining the coefficients in the model, we find that the number of exposure features shrank from 49 features to 14. The features of highest importance include pre-natal exposures to caesium (Cs), categorized levels of cotinine, molybdenum (Mo), lipid-adjusted DDE, and creatinine-adjusted BPA, respectively.
 
+#### Final model evaluation
+
+Finally, we will evaluate the performance our final LASSO model by making predictions in the test data. We will use the `postResample()` function to get performance measures of RMSE, R-squared, and MAE of the model on the test data.
+
+```{r}
+# Make predictions in test set
+lasso_pred = mod_lasso %>% predict(test.data)
+test.data = test.data %>% mutate(lasso_pred = lasso_pred)
+
+# Model prediction performance
+postResample(pred = lasso_pred, obs = test.data$hs_Gen_Tot) %>% 
+  kbl(digits = 4) %>% 
+  kable_classic("hover") 
+```
+
+The final model results in an RMSE of 16.82 and R-squared of 0.048. 
 
