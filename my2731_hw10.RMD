@@ -19,13 +19,14 @@ We will use these features to try to identify which pre-natal chemical exposures
 
 ### Load .Rdata file and merge into single data frame
 
-Below we will merge the exposome data, select the features related to pre-natal chemical exposures, select our phenotypic outcome of interest, `hs_Gen_Tot`, and partition the data into a 70/30 training-testing split.
+Below we will merge the exposome data, select the features related to pre-natal chemical exposures, select our phenotypic outcome of interest, `hs_Gen_Tot`, and partition the data into a 70/30 training-testing split. Since many of the chemical exposure features may exhibit multicollinearity, we will also remove highly correlated features above a cutoff of 0.4.
 
 ```{r dataprep}
 library(tidyverse)
 library(caret)
 library(rpart.plot)
 library(kableExtra)
+library(corrplot)
 
 #Load data using path of where file is stored
 load("./exposome.RData")
@@ -41,16 +42,25 @@ studydata$ID<-NULL
 studydata = studydata %>% select(hs_as_m_Log2:hs_tl_mdich_None, hs_dde_madj_Log2:hs_cotinine_mcat_None, hs_Gen_Tot) %>% 
   select(contains(c("_m_", "_madj_", "e3_asmokcigd_p_None", "hs_cotinine_mcat_None", "hs_Gen_Tot")))
 
+#Finding correlated predictors
+numeric.studydata = studydata %>% select(where(is.numeric))
+corplot = cor(numeric.studydata)
+correlations<-cor(numeric.studydata, use="complete.obs")
+high.correlations<-findCorrelation(correlations, cutoff=0.4)
+
+#Remove highly correlated features
+new.data.low.corr <- studydata[,-high.correlations]
+
 #Partition data
 set.seed(123)
-train.indices<-createDataPartition(y=studydata$hs_Gen_Tot, p=0.7, list=FALSE)
-train.data<-studydata[train.indices, ]
-test.data<-studydata[-train.indices, ]
+train.indices<-createDataPartition(y=new.data.low.corr$hs_Gen_Tot, p=0.7, list=FALSE)
+train.data<-new.data.low.corr[train.indices, ]
+test.data<-new.data.low.corr[-train.indices, ]
 ```
 
 ### Step 1: Exploration of Training Data
 
-The code chunk below outputs a table of summary statistics of the test data features. We will also plot the distribution of the outcome, the outcome, `hs_Gen_Tot`, to examine its overall distribution.
+The code chunk below outputs a table of summary statistics of the test data features. We will also plot the distribution of the outcome, the outcome, `hs_Gen_Tot`, to examine its overall distribution. We will also look at the correlation between features using `corrplot`.
 
 ```{r dataexplore}
 summary(train.data) %>% kbl(digits = 3) %>% 
@@ -58,18 +68,23 @@ summary(train.data) %>% kbl(digits = 3) %>%
   scroll_box(width = "100%", height = "100%")
 
 ggplot(data = train.data, aes(x = hs_Gen_Tot)) + geom_histogram()
+
+numeric.train.data = train.data %>% select(where(is.numeric))
+corplot = cor(numeric.train.data)
+corrplot(corplot, method="color", tl.col="black", tl.srt=45, tl.cex = 0.5)
 ```
-Based on the summary statistics, the log-transformed pre-natal chemical exposures have varying distributions across features, with features like arsenic levels (`hs_as_m_Log2`) , while the outcome appears to be right-skewed. 
+
+Based on the summary statistics for the `r ncol(train.data)` features in the training data, the log-transformed pre-natal chemical exposures have varying distributions across features, while the outcome appears to be right-skewed. Moreover, after removing correlated features, we can see there is no concerning multicollinearity between features in our training data.
 
 ### Step 2: Research Question
 
-*What are the pre-natal exposures to chemicals (metals, Organochlorines, Organophosphate pesticides, PBDE, PFAS, Phenols, tobacco smoke) that best predict childhood neurobehavioural internalizing and externalizing problems (as measured on the CBCL scale)?*
+*What are the pre-natal exposures to chemicals (metals, organochlorines, organophosphate pesticides, PBDE, PFAS, phenols, tobacco smoke) that best predict childhood neurobehavioural internalizing and externalizing problems (as measured on the CBCL scale)?*
 
 ***
 
 ### Step 3: Implement pipeline to address research question
 
-For feature selection, we will use a LASSO algorithm to identify the features that best predict childhood internalizing/externalizing problems through the CBCL scale. The model will be trained using 10-fold cross-validation, with the alpha value fixed to 1 and using a search grid of 100 values between 10^(-0.5) and 10^(0.5) to tune lambda. The best tune will be selected based on the lowest RMSE. 
+For feature selection, we will use a LASSO algorithm to identify the features that best predict childhood internalizing/externalizing problems through the CBCL scale. The model will be trained using 10-fold cross-validation on data that is centered and scaled, with the alpha value fixed to 1 and using a search grid of 100 values between 10^(-0.5) and 10^(0.5) to tune lambda. The best tune will be selected based on the lowest RMSE. 
 
 ```{r algorithm}
 set.seed(123)
@@ -97,7 +112,7 @@ coef(mod_lasso$finalModel, mod_lasso$bestTune$lambda)
 varImp(mod_lasso$finalModel) %>% arrange(desc(Overall)) %>% head(15)
 ```
 
-The best tune for the LASSO model was found to be `r round(mod_lasso$bestTune$lambda, 3)`. Examining the coefficients in the model, we find that the number of exposure features shrank from 49 features to 14. The features of highest importance include pre-natal exposures to caesium (Cs), categorized levels of cotinine, molybdenum (Mo), lipid-adjusted DDE, and creatinine-adjusted BPA, respectively.
+The best tune for the LASSO model was found to be `r round(mod_lasso$bestTune$lambda, 3)`. Examining the coefficients in the model, we find that the number of exposure features shrank from 32 features to 11. The features of highest importance include pre-natal exposures to caesium (Cs), categorized levels of cotinine (indicator of tobacco smoke), lipid-adjusted DDE, and creatinine-adjusted BPA, and molybdenum (Mo), respectively.
 
 #### Final model evaluation
 
@@ -114,5 +129,4 @@ postResample(pred = lasso_pred, obs = test.data$hs_Gen_Tot) %>%
   kable_classic("hover") 
 ```
 
-The final model results in an RMSE of 16.82 and R-squared of 0.048. 
-
+The final model results in an RMSE of 16.81 and R-squared of 0.049. This may suggest limited predictive performance of our LASSO model. Next steps to address the research question could be to evaluate the importance of the identified features by introducing covariates that are hypothesized to be confounders in the model, or run other feature selection models to see if there are better-performing predictive models and to compare whether the same features were selected to be important across algorithms.
